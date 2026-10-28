@@ -65,6 +65,7 @@ import { StatusEventRepository } from '@gitroom/nestjs-libraries/database/prisma
 import { InfraHealthService } from '@gitroom/nestjs-libraries/database/prisma/status/infra-health.service';
 import { InfraHealthRepository } from '@gitroom/nestjs-libraries/database/prisma/status/infra-health.repository';
 import { AiModule } from '@gitroom/nestjs-libraries/ai/ai.module';
+import { DmAgentService } from '@gitroom/nestjs-libraries/dm-agent/dm-agent.service';
 
 @Global()
 @Module({
@@ -131,6 +132,7 @@ import { AiModule } from '@gitroom/nestjs-libraries/ai/ai.module';
     ReviewLinksRepository,
     ReviewLinksService,
     InstagramMessagingService,
+    DmAgentService,
     RepostRepository,
     RepostService,
     StatusService,

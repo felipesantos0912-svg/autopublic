@@ -200,6 +200,61 @@ export class InstagramMessagingService {
   }
 
   /**
+   * Nome e @ de quem escreveu (User Profile API), usando o mesmo token de
+   * messaging do envio. O nome pode vir vazio; devolve null se nao houver token
+   * ou se a Meta recusar (nunca lanca: o chamador segue sem nome).
+   */
+  async fetchUserProfile(params: {
+    organizationId: string;
+    profileId: string | null;
+    igBusinessAccountId: string;
+    igsid: string;
+  }): Promise<{ name?: string; username?: string } | null> {
+    try {
+      const state = await this.loadState(params.organizationId, params.profileId);
+      let baseUrl: string;
+      let token: string;
+      if (state.metaSystemUserToken) {
+        baseUrl = `${GRAPH_FB}/${params.igsid}`;
+        token = state.metaSystemUserToken;
+      } else {
+        const entry = state.instagramTokens.find(
+          (t) => t.igUserId === params.igBusinessAccountId
+        );
+        if (!entry) return null;
+        token = await this.ensureFreshIgToken(
+          params.organizationId,
+          params.profileId,
+          state,
+          entry
+        );
+        baseUrl = `${GRAPH_IG}/${params.igsid}`;
+      }
+      const res = await fetch(
+        `${baseUrl}?fields=name,username&access_token=${encodeURIComponent(token)}`
+      );
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || body?.error) {
+        this._logger.warn(
+          `User profile error for IGSID=${params.igsid}: ${
+            body?.error ? JSON.stringify(body.error) : `HTTP ${res.status}`
+          }`
+        );
+        return null;
+      }
+      return {
+        name: typeof body.name === 'string' ? body.name : undefined,
+        username: typeof body.username === 'string' ? body.username : undefined,
+      };
+    } catch (e: any) {
+      this._logger.warn(
+        `User profile threw for IGSID=${params.igsid}: ${e?.message || String(e)}`
+      );
+      return null;
+    }
+  }
+
+  /**
    * Returns:
    *   true  -> Meta said the user follows the business
    *   false -> Meta said explicitly the user does NOT follow

@@ -12,6 +12,7 @@ const {
   appendExecutionLog,
   createPendingPostback,
   sendOpeningDmWithPostback,
+  runDmAgent,
 } = proxyActivities<FlowActivity>({
   startToCloseTimeout: '5 minute',
   taskQueue: 'main',
@@ -30,7 +31,7 @@ export interface FlowExecutionInput {
   flowId: string;
   integrationId: string;
   // Comment-based trigger fields (triggerType omitted or 'comment_on_post')
-  triggerType?: 'comment_on_post' | 'story_reply';
+  triggerType?: 'comment_on_post' | 'story_reply' | 'dm_direct';
   igCommentId?: string;
   igCommenterId?: string;
   igCommenterName?: string;
@@ -44,6 +45,8 @@ export interface FlowExecutionInput {
   igMessageId?: string;
   messageText?: string;
   reaction?: string;
+  // Atendente de DM (triggerType='dm_direct'): anexos da mensagem (fotos etc.)
+  attachments?: Array<{ type: string; url: string }>;
 }
 
 /** Mutable context passed through the graph traversal. */
@@ -87,6 +90,38 @@ export async function flowExecutionWorkflow(input: FlowExecutionInput) {
       await updateExecution(input.executionId, {
         status: 'FAILED' as any,
         error: 'No trigger node found',
+        completedAt: new Date(),
+      });
+      return;
+    }
+
+    // Atendente de DM: o proprio agente decide, valida e (no modo auto) envia as
+    // respostas. Nao percorre o grafo; a configuracao vive no no TRIGGER.
+    if (input.triggerType === 'dm_direct') {
+      const result = await runDmAgent({
+        integrationId: flow.integrationId || input.integrationId,
+        organizationId: flow.organizationId,
+        triggerNodeData: triggerNode.data ?? null,
+        igSenderId: input.igSenderId || '',
+        igMessageId: input.igMessageId || '',
+        messageText: input.messageText || '',
+        attachments: input.attachments || [],
+      });
+      await appendExecutionLog(input.executionId, {
+        nodeId: triggerNode.id,
+        nodeType: 'DM_AGENT',
+        status: result.status,
+        timestamp: new Date().toISOString(),
+        error: JSON.stringify({
+          note: result.note,
+          handoff: result.handoff,
+          violations: result.violations,
+          proposed: result.proposed,
+          sent: result.sent,
+        }).slice(0, 1800),
+      });
+      await updateExecution(input.executionId, {
+        status: 'COMPLETED' as any,
         completedAt: new Date(),
       });
       return;

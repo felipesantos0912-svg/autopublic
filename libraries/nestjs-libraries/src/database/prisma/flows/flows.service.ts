@@ -39,6 +39,8 @@ import { EncryptionService } from '@gitroom/nestjs-libraries/crypto/encryption.s
 import { StatusEventService } from '@gitroom/nestjs-libraries/database/prisma/status/status-event.service';
 import { decryptIntegrationToken } from '@gitroom/nestjs-libraries/crypto/integration-token.helper';
 import * as crypto from 'crypto';
+import { DmAgentState } from '@gitroom/nestjs-libraries/dm-agent/dm-agent.state';
+import { parseAgentConfig } from '@gitroom/nestjs-libraries/dm-agent/dm-agent.logic';
 
 // Janela de 24h da Meta para trocar mensagens apos interacao do usuario.
 // Usamos 23h para dar margem de seguranca e nao tentar DM expirado.
@@ -807,6 +809,11 @@ export class FlowsService {
     if (triggerType === 'story_reply') {
       triggerConfig.matchReactions = body.matchReactions ?? true;
     }
+    // Atendente de DM: a configuracao do agente (ficha, horario, modo) vive no
+    // proprio no TRIGGER. Padrao seguro: modo "shadow" (so registra, nao envia).
+    if (triggerType === 'dm_direct' && body.agent) {
+      triggerConfig.agent = body.agent;
+    }
     // The follow-gate flag works for both triggers:
     //   story_reply  -> sends gate text via regular DM
     //   comment_on_post -> sends gate text via private reply (button stripped)
@@ -835,13 +842,17 @@ export class FlowsService {
 
   private getTriggerType(flow: {
     nodes?: Array<{ type: string; label?: string | null; data: string | null }>;
-  }): 'comment_on_post' | 'story_reply' {
+  }): 'comment_on_post' | 'story_reply' | 'dm_direct' {
     const trigger = flow.nodes?.find((n) => n.type === 'TRIGGER');
     if (trigger?.label === 'story_reply') return 'story_reply';
+    // dm_direct precisa ser reconhecido AQUI: sem isso o fallback abaixo trataria
+    // o flow do atendente como "comentario em post" e um comentario o acionaria.
+    if (trigger?.label === 'dm_direct') return 'dm_direct';
     if (trigger?.data) {
       try {
         const parsed = JSON.parse(trigger.data);
         if (parsed?.triggerType === 'story_reply') return 'story_reply';
+        if (parsed?.triggerType === 'dm_direct') return 'dm_direct';
       } catch {
         // ignore
       }
@@ -1527,6 +1538,152 @@ export class FlowsService {
     }
 
     return results;
+  }
+
+  // --- Atendente de DM (gatilho dm_direct) ---
+
+  /**
+   * Mensagem direta comum (sem story) de um cliente. So reage a flows com
+   * gatilho `dm_direct` e, se houver mais de um ativo na conta, so o mais antigo
+   * responde (nunca em duplicidade). Respeita a pausa por conversa (pessoa da
+   * loja assumiu ou o agente passou a bola) e deduplica por mensagem.
+   */
+  async handleIncomingDirectMessage(payload: {
+    integrationId: string;
+    organizationId: string;
+    igThreadId?: string;
+    igMessageId: string;
+    igSenderId: string;
+    messageText: string;
+    attachments?: Array<{ type: string; url: string }>;
+  }) {
+    const dmFlows = (
+      await this._flowsRepository.getActiveFlowsForIntegration(
+        payload.integrationId
+      )
+    )
+      .filter((f) => this.getTriggerType(f) === 'dm_direct')
+      .sort((a, b) => +new Date(a.createdAt) - +new Date(b.createdAt));
+    if (!dmFlows.length) return [];
+    const flow = dmFlows[0];
+
+    if (await DmAgentState.isPaused(payload.integrationId, payload.igSenderId)) {
+      await DmAgentState.pushHistory(payload.integrationId, payload.igSenderId, {
+        r: 'u',
+        t: payload.messageText || '[anexo]',
+        ts: Date.now(),
+      });
+      this._logger.log(
+        `dm_direct: conversa pausada, mensagem ${payload.igMessageId} so registrada no historico`
+      );
+      return [];
+    }
+
+    const existing = await this._flowsRepository.findExistingExecutionByMessage(
+      flow.id,
+      payload.igMessageId
+    );
+    if (existing) return [];
+
+    const workflowId = `flow-exec-${flow.id}-${payload.igMessageId}`;
+    const execution = await this._flowsRepository.createExecution({
+      flowId: flow.id,
+      temporalWorkflowId: workflowId,
+      triggerType: 'dm_direct',
+      igCommenterId: payload.igSenderId,
+      igMediaId: 'dm',
+      igThreadId: payload.igThreadId,
+      igMessageId: payload.igMessageId,
+      commentText: payload.messageText || '',
+    });
+
+    const temporalClient = this._temporalService.client.getRawClient();
+    if (!temporalClient) {
+      this._logger.error(
+        `Temporal client unavailable — orchestrator offline? Marking execution ${execution.id} (flow=${flow.id}) as FAILED`
+      );
+      await this.updateExecution(execution.id, {
+        status: FlowExecutionStatus.FAILED,
+        error: 'Temporal client unavailable (orchestrator offline)',
+        completedAt: new Date(),
+      });
+      return [execution];
+    }
+
+    try {
+      await temporalClient.workflow.start('flowExecutionWorkflow', {
+        workflowId,
+        taskQueue: 'main',
+        args: [
+          {
+            executionId: execution.id,
+            flowId: flow.id,
+            triggerType: 'dm_direct',
+            igSenderId: payload.igSenderId,
+            igThreadId: payload.igThreadId,
+            igMessageId: payload.igMessageId,
+            messageText: payload.messageText,
+            attachments: payload.attachments || [],
+            integrationId: payload.integrationId,
+          },
+        ],
+        typedSearchAttributes: new TypedSearchAttributes([
+          {
+            key: orgSearchAttr,
+            value: payload.organizationId,
+          },
+        ]),
+      });
+    } catch (err) {
+      await this.updateExecution(execution.id, {
+        status: FlowExecutionStatus.FAILED,
+        error: err instanceof Error ? err.message : 'Failed to start workflow',
+        completedAt: new Date(),
+      });
+    }
+    return [execution];
+  }
+
+  /**
+   * Eco de uma mensagem enviada PELA conta do negocio. Se nao foi o agente que
+   * a enviou (nao esta na lista de textos recentes), foi uma pessoa da loja
+   * respondendo pelo app: o agente se cala naquela conversa por `pauseHours`.
+   */
+  async handleOutgoingEcho(payload: {
+    integrationId: string;
+    customerIgsid: string;
+    text: string;
+  }) {
+    const dmFlows = (
+      await this._flowsRepository.getActiveFlowsForIntegration(
+        payload.integrationId
+      )
+    )
+      .filter((f) => this.getTriggerType(f) === 'dm_direct')
+      .sort((a, b) => +new Date(a.createdAt) - +new Date(b.createdAt));
+    if (!dmFlows.length || !payload.text) return;
+
+    if (
+      await DmAgentState.isOwnEcho(
+        payload.integrationId,
+        payload.customerIgsid,
+        payload.text
+      )
+    ) {
+      return;
+    }
+    const trigger = dmFlows[0].nodes?.find((n) => n.type === 'TRIGGER');
+    const cfg = parseAgentConfig(trigger?.data);
+    const hours = cfg?.pauseHours ?? 12;
+    await DmAgentState.pause(payload.integrationId, payload.customerIgsid, hours);
+    await DmAgentState.pushHistory(payload.integrationId, payload.customerIgsid, {
+      r: 'h',
+      t: payload.text,
+      ts: Date.now(),
+    });
+    this._logger.log(
+      `dm_direct: pessoa da loja respondeu a ${payload.customerIgsid}; agente pausado por ${hours}h`
+    );
   }
 
   // --- Follow-gate em 2 etapas (postback) ---

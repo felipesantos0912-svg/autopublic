@@ -11,6 +11,12 @@ import { decryptIntegrationToken } from '@gitroom/nestjs-libraries/crypto/integr
 import { FlowExecutionStatus } from '@prisma/client';
 import type { InstagramProvider } from '@gitroom/nestjs-libraries/integrations/social/instagram.provider';
 import type { InstagramDmButton } from '@gitroom/nestjs-libraries/integrations/social/instagram-dm-button.type';
+import { DmAgentService } from '@gitroom/nestjs-libraries/dm-agent/dm-agent.service';
+import { parseAgentConfig } from '@gitroom/nestjs-libraries/dm-agent/dm-agent.logic';
+import type {
+  DmAgentAttachment,
+  DmAgentRunResult,
+} from '@gitroom/nestjs-libraries/dm-agent/dm-agent.types';
 
 const GATE_FALLBACK_MESSAGE =
   'Olá! Esse conteúdo é exclusivo para seguidores. Me segue aqui e clica no botão abaixo 💙';
@@ -28,7 +34,8 @@ export class FlowActivity {
     private _integrationManager: IntegrationManager,
     private _instagramMessagingService: InstagramMessagingService,
     private _unmatchedCommentService: UnmatchedCommentService,
-    private _encryption: EncryptionService
+    private _encryption: EncryptionService,
+    private _dmAgent: DmAgentService
   ) {}
 
   // Descriptografa integration.token in-place (B1). No-op em tokens sem prefixo
@@ -194,6 +201,38 @@ export class FlowActivity {
       message,
       button,
       integrationName: integration.name || undefined,
+    });
+  }
+
+  /**
+   * Atendente de DM (gatilho dm_direct). A config vem do `data` do no TRIGGER;
+   * sem ficha valida o agente nao responde. Padrao seguro: modo "shadow".
+   */
+  @ActivityMethod()
+  async runDmAgent(input: {
+    integrationId: string;
+    organizationId: string;
+    triggerNodeData: string | null;
+    igSenderId: string;
+    igMessageId: string;
+    messageText: string;
+    attachments: DmAgentAttachment[];
+  }): Promise<DmAgentRunResult> {
+    const cfg = parseAgentConfig(input.triggerNodeData);
+    if (!cfg) {
+      return {
+        status: 'skipped',
+        note: 'atendente desligado ou sem configuração válida (ficha vazia)',
+      };
+    }
+    return this._dmAgent.run({
+      integrationId: input.integrationId,
+      organizationId: input.organizationId,
+      cfg,
+      igSenderId: input.igSenderId,
+      igMessageId: input.igMessageId,
+      messageText: input.messageText,
+      attachments: input.attachments,
     });
   }
 

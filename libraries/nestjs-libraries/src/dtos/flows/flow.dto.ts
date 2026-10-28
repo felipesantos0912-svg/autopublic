@@ -11,6 +11,7 @@ import {
   IsIn,
   IsBoolean,
   IsInt,
+  IsObject,
   Min,
   Max,
   MaxLength,
@@ -124,14 +125,22 @@ export class QuickCreateFlowDto {
   integrationId: string;
 
   @ApiPropertyOptional({
-    enum: ['comment_on_post', 'story_reply'],
+    enum: ['comment_on_post', 'story_reply', 'dm_direct'],
     default: 'comment_on_post',
     description:
-      'Gatilho: comentário em post (comment_on_post) ou resposta a uma story (story_reply).',
+      'Gatilho: comentário em post (comment_on_post), resposta a uma story (story_reply) ou mensagem direta (dm_direct, atendente de IA).',
   })
   @IsOptional()
-  @IsIn(['comment_on_post', 'story_reply'])
-  triggerType?: 'comment_on_post' | 'story_reply';
+  @IsIn(['comment_on_post', 'story_reply', 'dm_direct'])
+  triggerType?: 'comment_on_post' | 'story_reply' | 'dm_direct';
+
+  @ApiPropertyOptional({
+    description:
+      'Apenas dm_direct: configuração do atendente de IA (businessName, timezone, hours, knowledge, deliveryUrl, persona, mode "shadow"|"auto"...). Padrão seguro: mode "shadow" (só registra, não envia).',
+  })
+  @IsOptional()
+  @IsObject()
+  agent?: Record<string, any>;
 
   @ApiPropertyOptional({
     enum: ['all', 'specific', 'next_publication'],

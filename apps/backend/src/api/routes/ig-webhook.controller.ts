@@ -134,7 +134,7 @@ export class IgWebhookController {
 
         // Some Meta apps deliver messages via `changes` as well. Route them
         // through the same messaging handler when that happens.
-        if (change.field === 'messages') {
+        if (change.field === 'messages' || change.field === 'message_echoes') {
           if (
             change.value &&
             this.isEntryAllowed(scope, ownersByEntryId, igAccountId)
@@ -204,14 +204,17 @@ export class IgWebhookController {
     event: any,
     scope: SignatureScope
   ) {
-    // Only story_mention / story_reply / reaction are handled here. Plain
-    // DMs without a story context are ignored (future feature).
+    // Story mention / story reply / reaction viram flows de story. DM comum
+    // (sem story) vai para o atendente de DM (flows dm_direct).
     const senderId = event?.sender?.id;
     const recipientId = event?.recipient?.id;
     if (!senderId || !recipientId) return;
 
-    // Skip echoes of the bot's own outgoing messages.
+    // Eco: mensagem enviada PELA conta do negocio (o proprio agente ou uma
+    // pessoa da loja pelo app). Nunca dispara automacao; so serve para o
+    // atendente se calar quando um humano assume a conversa.
     if (senderId === igAccountId || event?.message?.is_echo) {
+      await this.processEcho(igAccountId, event, scope);
       return;
     }
 
@@ -260,7 +263,8 @@ export class IgWebhookController {
     }
 
     if (!igStoryId) {
-      // Not story-related — ignore silently.
+      // Nao e de story: mensagem direta comum -> atendente de DM (dm_direct).
+      await this.processDirectMessage(igAccountId, event, scope);
       return;
     }
 
@@ -343,6 +347,108 @@ export class IgWebhookController {
         igStoryId: data.igStoryId,
         messageText: data.messageText,
         reaction: data.reaction,
+      });
+    }
+  }
+
+  /**
+   * Eco de mensagem enviada pela propria conta do negocio. Se nao foi o agente
+   * que enviou, uma pessoa da loja respondeu pelo app: pausa o atendente.
+   * Nunca lanca (nao pode derrubar o webhook).
+   */
+  private async processEcho(
+    igAccountId: string,
+    event: any,
+    scope: SignatureScope
+  ) {
+    const customerId: string | undefined =
+      event?.sender?.id === igAccountId
+        ? event?.recipient?.id
+        : event?.sender?.id;
+    const text: string =
+      typeof event?.message?.text === 'string' ? event.message.text : '';
+    if (!customerId || !text) return;
+    try {
+      const integrations =
+        await this._integrationService.getIntegrationsByInternalId(
+          igAccountId
+        );
+      for (const integration of integrations) {
+        if (
+          integration.providerIdentifier !== 'instagram' ||
+          integration.disabled ||
+          integration.deletedAt ||
+          !this.isOrgAllowed(scope, integration.organizationId)
+        ) {
+          continue;
+        }
+        await this._flowsService.handleOutgoingEcho({
+          integrationId: integration.id,
+          customerIgsid: customerId,
+          text,
+        });
+      }
+    } catch (e) {
+      this._logger.warn(
+        `IG webhook: falha ao tratar eco: ${
+          e instanceof Error ? e.message : String(e)
+        }`
+      );
+    }
+  }
+
+  /**
+   * Mensagem direta comum (sem story): atendente de DM. So age em contas que
+   * tenham um flow dm_direct ativo; nas demais o FlowsService devolve vazio.
+   */
+  private async processDirectMessage(
+    igAccountId: string,
+    event: any,
+    scope: SignatureScope
+  ) {
+    const message = event?.message;
+    if (!message || message.is_deleted || message.is_unsupported) return;
+    const igMessageId: string | undefined = message.mid;
+    const igSenderId: string | undefined = event?.sender?.id;
+    if (!igMessageId || !igSenderId) return;
+
+    const messageText: string =
+      typeof message.text === 'string' ? message.text : '';
+    const attachments: Array<{ type: string; url: string }> = (
+      Array.isArray(message.attachments) ? message.attachments : []
+    )
+      .map((a: any) => ({
+        type: String(a?.type || ''),
+        url: String(a?.payload?.url || ''),
+      }))
+      .filter((a: { type: string; url: string }) => a.type && a.url)
+      .slice(0, 4);
+    if (!messageText && attachments.length === 0) return;
+
+    const integrations =
+      await this._integrationService.getIntegrationsByInternalId(igAccountId);
+    for (const integration of integrations) {
+      if (
+        integration.providerIdentifier !== 'instagram' ||
+        integration.disabled ||
+        integration.deletedAt
+      ) {
+        continue;
+      }
+      if (!this.isOrgAllowed(scope, integration.organizationId)) {
+        this._logger.warn(
+          `IG webhook: skipping direct message dispatch to org ${integration.organizationId} outside signature scope`
+        );
+        continue;
+      }
+      await this._flowsService.handleIncomingDirectMessage({
+        integrationId: integration.id,
+        organizationId: integration.organizationId,
+        igThreadId: event?.recipient?.id,
+        igMessageId,
+        igSenderId,
+        messageText,
+        attachments,
       });
     }
   }
