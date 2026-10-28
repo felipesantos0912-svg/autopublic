@@ -1,6 +1,8 @@
 import {
+  buildHandoffPayload,
   buildPriceIndex,
   buildSystemPrompt,
+  isAllowedWebhookHost,
   defaultHandoffMessage,
   describeNow,
   echoKey,
@@ -190,6 +192,42 @@ describe('eco, nomes, prompt', () => {
     expect(p).toMatch(/glovoapp\.com/);
     expect(p).toMatch(/Marcus/);
     expect(buildSystemPrompt(cfg, 'x', undefined)).toMatch(/Nome do cliente desconhecido/);
+  });
+});
+
+describe('aviso de transferência para a equipa', () => {
+  it('só chama hosts liberados na env', () => {
+    expect(isAllowedWebhookHost('http://n8n:5678/webhook/atendente', 'n8n')).toBe(true);
+    expect(isAllowedWebhookHost('http://N8N:5678/x', 'n8n, outro')).toBe(true);
+    expect(isAllowedWebhookHost('http://n8n:5678/x', undefined)).toBe(false);
+    expect(isAllowedWebhookHost('http://n8n:5678/x', '')).toBe(false);
+    expect(isAllowedWebhookHost('http://evil.com/x', 'n8n')).toBe(false);
+    expect(isAllowedWebhookHost('nao e url', 'n8n')).toBe(false);
+  });
+  it('config aceita só http/https; corpo do aviso traz cliente, motivo e hora', () => {
+    const c = parseAgentConfig(
+      JSON.stringify({
+        agent: { knowledge: 'x', businessName: 'Loja', handoffWebhookUrl: 'http://n8n:5678/webhook/a' },
+      })
+    )!;
+    expect(c.handoffWebhookUrl).toBe('http://n8n:5678/webhook/a');
+    expect(
+      parseAgentConfig(JSON.stringify({ agent: { knowledge: 'x', handoffWebhookUrl: 'ftp://x' } }))!
+        .handoffWebhookUrl
+    ).toBeUndefined();
+    const p = buildHandoffPayload({
+      cfg: c, integrationId: 'i1', igsid: '123', name: 'Ana', username: 'ana',
+      customerMessage: 'sou alérgica a glúten', reason: 'alergia', now: new Date('2026-10-28T10:00:00Z'),
+    });
+    expect(p.event).toBe('handoff');
+    expect(p.business).toBe('Loja');
+    expect(p.customer.name).toBe('Ana');
+    expect(p.reason).toBe('alergia');
+    expect(p.at).toBe('2026-10-28T10:00:00.000Z');
+    expect(
+      buildHandoffPayload({ cfg: c, integrationId: 'i', igsid: '1', customerMessage: 'x'.repeat(900), now: new Date() })
+        .message.length
+    ).toBe(500);
   });
 });
 

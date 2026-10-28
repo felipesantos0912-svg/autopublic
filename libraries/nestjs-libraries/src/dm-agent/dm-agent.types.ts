@@ -27,6 +27,11 @@ export interface DmAgentConfig {
   /** Outros links que o agente pode enviar (alem dos que ja estao na ficha). */
   allowedUrls: string[];
   handoffMessage?: string;
+  /**
+   * Webhook (ex.: n8n interno) avisado quando o agente passa a conversa para a
+   * equipa. So e chamado se o host estiver em DM_AGENT_WEBHOOK_HOSTS.
+   */
+  handoffWebhookUrl?: string;
   /** Quantas horas o agente fica calado depois de passar para humano. */
   pauseHours: number;
   /** Limite de respostas por hora para UM cliente. */

@@ -9,9 +9,11 @@ import { InstagramMessagingService } from '@gitroom/nestjs-libraries/integration
 import { DmAgentState } from './dm-agent.state';
 import type { DmHistoryEntry, DmProfile } from './dm-agent.state';
 import {
+  buildHandoffPayload,
   buildSystemPrompt,
   defaultHandoffMessage,
   describeNow,
+  isAllowedWebhookHost,
   parseModelOutput,
   pickFirstName,
   validateMessages,
@@ -130,6 +132,40 @@ export class DmAgentService {
     });
     if (fresh) await DmAgentState.setProfile(integration.id, igsid, fresh);
     return fresh;
+  }
+
+  /** Avisa a equipa (webhook interno, ex.: n8n) que o agente passou a conversa. Nunca lanca. */
+  private async notifyHandoff(
+    cfg: { handoffWebhookUrl?: string },
+    payload: Record<string, unknown>
+  ): Promise<void> {
+    const url = cfg.handoffWebhookUrl;
+    if (!url) return;
+    if (!isAllowedWebhookHost(url, process.env.DM_AGENT_WEBHOOK_HOSTS)) {
+      this._logger.warn(
+        'dm-agent: aviso de transferência ignorado (host fora de DM_AGENT_WEBHOOK_HOSTS)'
+      );
+      return;
+    }
+    const t = withTimeout(5_000);
+    try {
+      const secret = process.env.DM_AGENT_WEBHOOK_SECRET;
+      await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(secret ? { 'X-Atendente-Key': secret } : {}),
+        },
+        body: JSON.stringify(payload),
+        signal: t.signal,
+      });
+    } catch (e) {
+      this._logger.warn(
+        `dm-agent: aviso de transferência falhou: ${e instanceof Error ? e.message : String(e)}`
+      );
+    } finally {
+      t.clear();
+    }
   }
 
   /**
@@ -394,6 +430,19 @@ export class DmAgentService {
       }
       if (handoff) {
         await DmAgentState.pause(integrationId, igSenderId, cfg.pauseHours);
+        await this.notifyHandoff(
+          cfg,
+          buildHandoffPayload({
+            cfg,
+            integrationId,
+            igsid: igSenderId,
+            name: profile?.name,
+            username: profile?.username,
+            customerMessage: inboundText,
+            reason: out.handoffReason || violations.join(', '),
+            now,
+          })
+        );
       }
       return {
         status: 'sent',

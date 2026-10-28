@@ -117,6 +117,7 @@ export function parseAgentConfig(
     deliveryUrl: safeUrl(a.deliveryUrl),
     allowedUrls: allowed,
     handoffMessage: str(a.handoffMessage) || undefined,
+    handoffWebhookUrl: safeUrl(a.handoffWebhookUrl),
     pauseHours: clampNum(a.pauseHours, 1, 72, 12),
     maxRepliesPerHour: clampNum(a.maxRepliesPerHour, 1, 200, 30),
     maxTotalPerHour: clampNum(a.maxTotalPerHour, 10, 2000, 300),
@@ -512,6 +513,48 @@ export function validateMessages(
     }
   }
   return { ok: violations.length === 0, violations };
+}
+
+// ------------------------------------------------- aviso de transferencia
+
+/** O webhook de transferencia so pode apontar para hosts liberados na env (evita usar o servidor para chamar qualquer endereco). */
+export function isAllowedWebhookHost(url: string, allowedCsv: string | undefined): boolean {
+  const allowed = (allowedCsv || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (!allowed.length) return false;
+  try {
+    return allowed.includes(new URL(url).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+/** Corpo do aviso enviado a equipa (n8n -> CRM/WhatsApp) quando o agente passa a conversa. */
+export function buildHandoffPayload(input: {
+  cfg: DmAgentConfig;
+  integrationId: string;
+  igsid: string;
+  name?: string;
+  username?: string;
+  customerMessage: string;
+  reason?: string;
+  now: Date;
+}) {
+  return {
+    event: 'handoff',
+    business: input.cfg.businessName,
+    integrationId: input.integrationId,
+    customer: {
+      igsid: input.igsid,
+      name: input.name || null,
+      username: input.username || null,
+    },
+    message: input.customerMessage.slice(0, 500),
+    reason: (input.reason || '').slice(0, 200) || null,
+    at: input.now.toISOString(),
+  };
 }
 
 // ------------------------------------------------------------ eco e nomes
