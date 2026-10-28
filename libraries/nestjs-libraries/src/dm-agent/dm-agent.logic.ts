@@ -367,6 +367,62 @@ export function extractAmounts(text: string): string[] {
   return out;
 }
 
+function stripAccents(s: string): string {
+  return s.normalize('NFD').replace(/[̀-ͯ]/g, '');
+}
+
+function normKey(s: string): string {
+  return stripAccents(s)
+    .toLowerCase()
+    .replace(/[^a-z0-9\- ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const KEY_STOPWORDS = new Set([
+  'de', 'do', 'da', 'a', 'o', 'e', 'com', 'so', 'mais', 'apenas', 'por',
+  'em', 'no', 'na', 'um', 'uma', 'ate', 'desde', 'custa', 'sai', 'ou',
+]);
+
+/**
+ * Indice "nome do item" -> precos dele na ficha (ex.: "big burger" -> 10.90 e
+ * 16.90). Usado para barrar o erro tipico do modelo numa lista longa: dizer
+ * um preco que existe na ficha, mas e de OUTRO item.
+ */
+export function buildPriceIndex(knowledge: string): Map<string, Set<string>> {
+  const index = new Map<string, Set<string>>();
+  // Descricoes entre parenteses nao dao nome de item; so "(de 19,90 €)" (preco
+  // antigo do mesmo item) vira texto solto para ser ligado ao item anterior.
+  const text = knowledge
+    .replace(/\(\s*(de\s+\d[^)]*)\)/gi, ' $1 ')
+    .replace(/\([^)]*\)/g, ' ');
+  for (const piece of text.split(/[;\n]|\.\s+/)) {
+    const re = new RegExp(MONEY_RE.source, MONEY_RE.flags);
+    let prevEnd = 0;
+    let lastKey = '';
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(piece)) !== null) {
+      const n = parseFloat((m[1] || m[2] || '').replace(',', '.'));
+      const before = piece.slice(prevEnd, m.index);
+      prevEnd = re.lastIndex;
+      if (!isFinite(n)) continue;
+      const afterColon = before.includes(':')
+        ? before.slice(before.lastIndexOf(':') + 1)
+        : before;
+      const words = normKey(afterColon).split(' ').filter(Boolean);
+      while (words.length && KEY_STOPWORDS.has(words[0])) words.shift();
+      let key = words.slice(-4).join(' ');
+      // "X-Tudo 16,92 € de 19,90 €": o segundo valor sem nome e do item anterior
+      if (!key && lastKey) key = lastKey;
+      if (key.length < 3 || /^\d/.test(key)) continue;
+      lastKey = key;
+      if (!index.has(key)) index.set(key, new Set<string>());
+      index.get(key)!.add(n.toFixed(2));
+    }
+  }
+  return index;
+}
+
 export function extractUrls(text: string): string[] {
   const found = text.match(/https?:\/\/[^\s<>"')\]]+/gi) || [];
   return found.map((u) => u.replace(/[.,;:!?]+$/, ''));
@@ -384,6 +440,11 @@ function urlKey(u: string): string {
 const CONFIRMATION_RE =
   /(pedido|encomenda|reserva|mesa)\s+(foi\s+)?(confirmad[oa]|registad[oa]|anotad[oa])|\b(anotei|registei|reservei|marquei)\b|order\s+(is\s+)?confirmed|reservation\s+(is\s+)?confirmed/i;
 
+// Promessas comerciais que o agente nao pode inventar: so passam se a propria ficha as menciona.
+const PROMO_RE =
+  /\b(descont[oa]s?|promo[cç][aã]o|promo[cç][õo]es|ofert[ao]s?|gr[aá]tis|gratuit[oa]s?|cup[aã]o|cupom|brindes?)\b/i;
+const PERCENT_RE = /\d+(?:[.,]\d+)?\s?%/g;
+
 export function validateMessages(
   messages: string[],
   cfg: DmAgentConfig
@@ -391,6 +452,13 @@ export function validateMessages(
   const violations: string[] = [];
   const knowledgeAll = `${cfg.knowledge}\n${cfg.persona || ''}`;
   const allowedAmounts = new Set(extractAmounts(knowledgeAll));
+  const priceIndex = buildPriceIndex(knowledgeAll);
+  // linhas marcadas como "nao confirmado" citam promocoes/descontos justamente
+  // para dizer que NAO se sabe: nao contam como a ficha autorizando falar disso
+  const promoScope = knowledgeAll
+    .split('\n')
+    .filter((l) => !/n[ãa]o confirmado|❌|🟡/i.test(l))
+    .join('\n');
   const allowedUrls = new Set(
     [
       ...(cfg.deliveryUrl ? [cfg.deliveryUrl] : []),
@@ -406,8 +474,22 @@ export function validateMessages(
   for (const msg of messages) {
     if (!msg.trim()) violations.push('mensagem_vazia');
     if (msg.length > MAX_BUBBLE_CHARS) violations.push('mensagem_longa');
-    for (const amount of extractAmounts(msg)) {
-      if (!allowedAmounts.has(amount)) violations.push(`preco_fora_da_ficha:${amount}`);
+    const moneyRe = new RegExp(MONEY_RE.source, MONEY_RE.flags);
+    let mm: RegExpExecArray | null;
+    while ((mm = moneyRe.exec(msg)) !== null) {
+      const n = parseFloat((mm[1] || mm[2] || '').replace(',', '.'));
+      if (!isFinite(n)) continue;
+      const amount = n.toFixed(2);
+      if (!allowedAmounts.has(amount)) {
+        violations.push(`preco_fora_da_ficha:${amount}`);
+        continue;
+      }
+      // o valor existe na ficha; falta conferir se e do item citado logo antes
+      const windowText = ` ${normKey(msg.slice(Math.max(0, mm.index - 45), mm.index))} `;
+      const named = [...priceIndex.keys()].filter((k) => windowText.includes(` ${k} `));
+      if (named.length && !named.some((k) => priceIndex.get(k)!.has(amount))) {
+        violations.push(`preco_de_outro_item:${named.join('/')}:${amount}`);
+      }
     }
     for (const url of extractUrls(msg)) {
       if (!allowedUrls.has(urlKey(url))) violations.push(`link_fora_da_ficha:${urlKey(url)}`);
@@ -419,6 +501,15 @@ export function validateMessages(
       }
     }
     if (CONFIRMATION_RE.test(msg)) violations.push('confirmou_pedido_ou_reserva');
+    if (PROMO_RE.test(msg) && !PROMO_RE.test(promoScope)) {
+      violations.push('promocao_fora_da_ficha');
+    }
+    for (const pct of msg.match(PERCENT_RE) || []) {
+      const compact = pct.replace(/\s/g, '');
+      if (!knowledgeAll.replace(/\s%/g, '%').includes(compact)) {
+        violations.push(`percentagem_fora_da_ficha:${compact}`);
+      }
+    }
   }
   return { ok: violations.length === 0, violations };
 }

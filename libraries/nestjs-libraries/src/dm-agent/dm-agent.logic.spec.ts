@@ -1,4 +1,5 @@
 import {
+  buildPriceIndex,
   buildSystemPrompt,
   defaultHandoffMessage,
   describeNow,
@@ -189,5 +190,57 @@ describe('eco, nomes, prompt', () => {
     expect(p).toMatch(/glovoapp\.com/);
     expect(p).toMatch(/Marcus/);
     expect(buildSystemPrompt(cfg, 'x', undefined)).toMatch(/Nome do cliente desconhecido/);
+  });
+});
+
+describe('preço de outro item e promoções inventadas', () => {
+  const k2 =
+    'Menus: X-Tudo 16,92 € (de 19,90 €); Big Burger 16,90 €. Só o item: X-Tudo 16,90 €; Big Burger 10,90 €; Cheese Bacon 10,40 €; Durum Kebab 9,00 € (em tortilha). Extras: bacon (2 fatias) 2,00 €.';
+  const cfg2 = parseAgentConfig(
+    JSON.stringify({ agent: { knowledge: k2, businessName: 'X' } })
+  )!;
+
+  it('índice de preços por item', () => {
+    const idx = buildPriceIndex(k2);
+    expect([...idx.get('big burger')!].sort()).toEqual(['10.90', '16.90']);
+    expect([...idx.get('x-tudo')!].sort()).toEqual(['16.90', '16.92', '19.90']);
+    expect(idx.get('durum kebab')!.has('9.00')).toBe(true);
+    expect(idx.get('bacon')!.has('2.00')).toBe(true);
+  });
+  it('preço que existe na ficha mas é de outro item é barrado', () => {
+    const r = validateMessages(['O Big Burger custa 9,00 €.'], cfg2);
+    expect(r.ok).toBe(false);
+    expect(r.violations.some((v) => v.startsWith('preco_de_outro_item'))).toBe(true);
+    expect(validateMessages(['O Cheese Bacon sai a 10,90 €.'], cfg2).ok).toBe(false);
+  });
+  it('preços certos passam, inclusive vários itens e preço antigo', () => {
+    expect(validateMessages(['O Big Burger sai a 10,90 € e o Cheese Bacon a 10,40 €.'], cfg2).ok).toBe(true);
+    expect(validateMessages(['O Big Burger sai a 10,90 € (ou 16,90 € no menu).'], cfg2).ok).toBe(true);
+    expect(validateMessages(['O menu X-Tudo está a 16,92 € (em vez de 19,90 €).'], cfg2).ok).toBe(true);
+    expect(validateMessages(['Podes juntar bacon por 2,00 €.'], cfg2).ok).toBe(true);
+    expect(validateMessages(['O Durum Kebab é 9,00 €.'], cfg2).ok).toBe(true);
+  });
+  it('desconto, promoção, grátis e percentagem inventados são barrados', () => {
+    expect(validateMessages(['Hoje tens 20% de desconto 🍔'], cfg).ok).toBe(false);
+    expect(validateMessages(['Temos uma promoção especial!'], cfg).ok).toBe(false);
+    expect(validateMessages(['A entrega é grátis hoje.'], cfg).ok).toBe(false);
+    expect(validateMessages(['Muito obrigado pela preferência! 🍔'], cfg).ok).toBe(true);
+  });
+  it('se a ficha cita a promoção, deixa de ser invenção; "não confirmado" não conta', () => {
+    const withPromo = parseAgentConfig(
+      JSON.stringify({
+        agent: { businessName: 'X', knowledge: 'Promoção de terça: Big Burger 9,90 €. Desconto de 10% para estudantes.' },
+      })
+    )!;
+    expect(validateMessages(['Na terça há promoção: Big Burger a 9,90 €.'], withPromo).ok).toBe(true);
+    expect(validateMessages(['Estudantes têm 10% de desconto.'], withPromo).ok).toBe(true);
+    expect(validateMessages(['Estudantes têm 50% de desconto.'], withPromo).ok).toBe(false);
+    const naoConf = parseAgentConfig(
+      JSON.stringify({
+        agent: { businessName: 'X', knowledge: 'Big Burger 10,90 €.\nNÃO CONFIRMADO (chama a equipa): descontos; reservas.' },
+      })
+    )!;
+    expect(validateMessages(['Hoje há desconto no Big Burger!'], naoConf).ok).toBe(false);
+    expect(validateMessages(['O Big Burger sai a 10,90 €.'], naoConf).ok).toBe(true);
   });
 });
