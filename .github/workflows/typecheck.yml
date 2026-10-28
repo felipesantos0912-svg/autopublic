@@ -51,5 +51,5 @@ jobs:
           cat tsc-mine.txt
           test ! -s tsc-mine.txt
 
-      - name: Testes do atendente de DM
-        run: pnpm exec jest --selectProjects nestjs-libraries --testPathPattern 'dm-agent' --passWithNoTests
+      - name: Testes do atendente de DM e das automações (os que já existiam também)
+        run: pnpm exec jest --selectProjects nestjs-libraries --testPathPattern 'dm-agent|prisma/flows' --passWithNoTests
