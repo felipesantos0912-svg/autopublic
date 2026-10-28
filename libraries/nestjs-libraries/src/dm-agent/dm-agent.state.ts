@@ -138,6 +138,23 @@ export const DmAgentState = {
     }
   },
 
+  /** Marca a mensagem mais recente da conversa (para so a ultima de uma sequencia responder). */
+  async setLatest(integrationId: string, igsid: string, igMessageId: string): Promise<void> {
+    try {
+      await ioRedis.set(key('latest', integrationId, igsid), igMessageId, 'EX', 300);
+    } catch {
+      // ignora
+    }
+  },
+
+  async getLatest(integrationId: string, igsid: string): Promise<string | null> {
+    try {
+      return (await ioRedis.get(key('latest', integrationId, igsid))) || null;
+    } catch {
+      return null;
+    }
+  },
+
   async getProfile(integrationId: string, igsid: string): Promise<DmProfile | null> {
     try {
       const raw = await ioRedis.get(key('prof', integrationId, igsid));

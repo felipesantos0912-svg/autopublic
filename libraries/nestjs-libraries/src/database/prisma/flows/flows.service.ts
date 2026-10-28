@@ -1585,6 +1585,13 @@ export class FlowsService {
     );
     if (existing) return [];
 
+    // Marca esta como a mensagem mais recente da conversa (debounce do agente).
+    await DmAgentState.setLatest(
+      payload.integrationId,
+      payload.igSenderId,
+      payload.igMessageId
+    );
+
     const workflowId = `flow-exec-${flow.id}-${payload.igMessageId}`;
     const execution = await this._flowsRepository.createExecution({
       flowId: flow.id,

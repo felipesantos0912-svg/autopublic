@@ -81,6 +81,19 @@ describe('parseAgentConfig', () => {
     expect(cfg.mode).toBe('shadow');
     expect(cfg.pauseHours).toBe(12);
     expect(cfg.maxRepliesPerHour).toBe(30);
+    expect(cfg.maxTotalPerHour).toBe(300);
+    expect(cfg.debounceSeconds).toBe(3);
+  });
+  it('limites fora da faixa são ajustados', () => {
+    const c = parseAgentConfig(
+      JSON.stringify({
+        agent: { knowledge: 'x', pauseHours: 999, maxRepliesPerHour: 0, debounceSeconds: 99, maxTotalPerHour: 1 },
+      })
+    )!;
+    expect(c.pauseHours).toBe(72);
+    expect(c.maxRepliesPerHour).toBe(1);
+    expect(c.debounceSeconds).toBe(15);
+    expect(c.maxTotalPerHour).toBe(10);
   });
   it('auto só quando pedido; config inválida vira null', () => {
     const c = parseAgentConfig(

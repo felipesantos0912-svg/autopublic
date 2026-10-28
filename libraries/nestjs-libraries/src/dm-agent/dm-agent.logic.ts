@@ -119,6 +119,8 @@ export function parseAgentConfig(
     handoffMessage: str(a.handoffMessage) || undefined,
     pauseHours: clampNum(a.pauseHours, 1, 72, 12),
     maxRepliesPerHour: clampNum(a.maxRepliesPerHour, 1, 200, 30),
+    maxTotalPerHour: clampNum(a.maxTotalPerHour, 10, 2000, 300),
+    debounceSeconds: clampNum(a.debounceSeconds, 0, 15, 3),
   };
 }
 

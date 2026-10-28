@@ -29,7 +29,12 @@ export interface DmAgentConfig {
   handoffMessage?: string;
   /** Quantas horas o agente fica calado depois de passar para humano. */
   pauseHours: number;
+  /** Limite de respostas por hora para UM cliente. */
   maxRepliesPerHour: number;
+  /** Limite de respostas por hora somando todos os clientes da conta (freio contra spam e custo de IA). */
+  maxTotalPerHour: number;
+  /** Espera antes de responder: se chegarem mais mensagens seguidas, so a ultima responde. */
+  debounceSeconds: number;
 }
 
 export interface DmAgentAttachment {

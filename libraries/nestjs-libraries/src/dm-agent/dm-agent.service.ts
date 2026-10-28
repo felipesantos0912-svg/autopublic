@@ -170,6 +170,37 @@ export class DmAgentService {
           note: 'conversa pausada: a equipa assumiu ou o agente passou a bola',
         };
       }
+      // Debounce: se o cliente mandar varias mensagens seguidas, so a ultima
+      // responde (as anteriores ficam no historico). Evita respostas duplicadas
+      // e atropeladas. O ponteiro "latest" e marcado quando o webhook chega.
+      if (cfg.debounceSeconds > 0) {
+        await sleep(cfg.debounceSeconds * 1000);
+        const latest = await DmAgentState.getLatest(integrationId, igSenderId);
+        if (latest && latest !== igMessageId) {
+          await DmAgentState.pushHistory(integrationId, igSenderId, {
+            r: 'u',
+            t: inboundText,
+            ts: Date.now(),
+          });
+          return {
+            status: 'skipped',
+            note: 'chegou uma mensagem mais recente em seguida; a resposta sai junto com ela',
+          };
+        }
+        // a equipa pode ter respondido durante a espera
+        if (await DmAgentState.isPaused(integrationId, igSenderId)) {
+          await DmAgentState.pushHistory(integrationId, igSenderId, {
+            r: 'u',
+            t: inboundText,
+            ts: Date.now(),
+          });
+          return {
+            status: 'paused',
+            note: 'conversa pausada durante a espera (a equipa assumiu)',
+          };
+        }
+      }
+
       if (
         !(await DmAgentState.underRateLimit(
           integrationId,
@@ -180,6 +211,18 @@ export class DmAgentService {
         return {
           status: 'skipped',
           note: 'limite de respostas por hora atingido para este cliente',
+        };
+      }
+      if (
+        !(await DmAgentState.underRateLimit(
+          integrationId,
+          '_total',
+          cfg.maxTotalPerHour
+        ))
+      ) {
+        return {
+          status: 'skipped',
+          note: 'limite total de respostas por hora da conta atingido',
         };
       }
 
