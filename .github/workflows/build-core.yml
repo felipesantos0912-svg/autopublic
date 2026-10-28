@@ -1,0 +1,76 @@
+---
+name: "Build Autopublic core"
+
+# Constrói a imagem do app (SEM a camada de marca) a partir deste repositório e publica no GHCR:
+#   ghcr.io/<dono>/autopublic-core:<tag>
+# A camada de marca (repositório autopublic-marca) é aplicada depois, por cima desta imagem, na VPS.
+# Só amd64 (a VPS é x86_64). Não precisa de segredo: usa o GITHUB_TOKEN da própria execução.
+#
+# Como rodar:  Actions > "Build Autopublic core" > Run workflow > informar a tag (ex.: 0.6.1-ap1)
+#              ou:  git tag core-v0.6.1-ap1 && git push origin core-v0.6.1-ap1
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag da imagem (ex.: 0.6.1-ap1)"
+        required: true
+        type: string
+  push:
+    tags:
+      - 'core-v*'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-core:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Define a tag e o nome da imagem
+        id: ver
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ -n "${INPUT_TAG}" ]; then V="${INPUT_TAG}"; else V="${GITHUB_REF_NAME#core-v}"; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/autopublic-core" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push Image
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          IMAGE: ${{ steps.ver.outputs.image }}
+        run: |
+          docker buildx build --platform linux/amd64 \
+            -f Dockerfile.dev \
+            -t "$IMAGE:$VERSION" \
+            --build-arg NEXT_PUBLIC_VERSION="$VERSION" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.licenses=AGPL-3.0-only" \
+            --pull \
+            --provenance=false --sbom=false \
+            --output "type=registry,name=$IMAGE:$VERSION" .
+
+      - name: Resumo (digest para fixar na camada de marca)
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          IMAGE: ${{ steps.ver.outputs.image }}
+        run: |
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')
+          echo "### Imagem publicada" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$IMAGE@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "$IMAGE@$DIGEST"
